@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / Packaging
+build/
+dist/
+*.spec
+
+# Application Output
+output_*/
+*.log
+*.pdf
+*.tex
+
+# IDEs
+.vscode/
+.idea/
