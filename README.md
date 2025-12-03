@@ -43,6 +43,13 @@ Run the included `InstallPrerequisites.exe` file. It will try to install MiKTeX 
 *   Check your internet connection.
 *   If a book is very large, it might take a while.
 
+### "It keeps asking to install packages (e.g., levy-font, B.mf)"
+**This is normal!**
+*   To keep the download small, we installed the "Basic" version of MiKTeX.
+*   When you create a PDF for the first time, it needs to download some fonts and packages.
+*   **Solution**: Just click **Install**.
+*   **Tip**: You can uncheck "Always show this dialog" so it installs them automatically in the future without asking.
+
 ### "My antivirus says the file is a virus!"
 **Don't worry, this is a False Positive.**
 *   The `InstallPrerequisites.exe` file is a simple script that downloads MiKTeX (the PDF tool) from the internet.
