@@ -85,37 +85,66 @@ def install_latex_packages():
         "quoting", "parskip", "titletoc", "uucharclasses"
     ]
     
-    # Find mpm (MiKTeX Package Manager)
+    # Find mpm (MiKTeX Package Manager) or miktex CLI
+    miktex_cmd = "miktex"
     mpm_cmd = "mpm"
-    if not shutil.which(mpm_cmd):
+    use_miktex_cli = False
+
+    if shutil.which(miktex_cmd):
+        use_miktex_cli = True
+        print(f"Found MiKTeX CLI: {miktex_cmd}")
+    elif shutil.which(mpm_cmd):
+        print(f"Found Legacy MPM: {mpm_cmd}")
+    else:
         # Check default user install location if not in PATH
         local_app_data = os.environ.get("LOCALAPPDATA", "")
-        candidate = os.path.join(local_app_data, "Programs", "MiKTeX", "miktex", "bin", "x64", "mpm.exe")
-        if os.path.exists(candidate):
-            mpm_cmd = candidate
-            # Also add to PATH for this process so other commands work
-            os.environ["PATH"] += os.pathsep + os.path.dirname(candidate)
+        # Try to find miktex.exe first (newer)
+        candidate_miktex = os.path.join(local_app_data, "Programs", "MiKTeX", "miktex", "bin", "x64", "miktex.exe")
+        candidate_mpm = os.path.join(local_app_data, "Programs", "MiKTeX", "miktex", "bin", "x64", "mpm.exe")
+        
+        if os.path.exists(candidate_miktex):
+            miktex_cmd = candidate_miktex
+            use_miktex_cli = True
+            os.environ["PATH"] += os.pathsep + os.path.dirname(candidate_miktex)
+        elif os.path.exists(candidate_mpm):
+            mpm_cmd = candidate_mpm
+            os.environ["PATH"] += os.pathsep + os.path.dirname(candidate_mpm)
         else:
-            print("Could not find MiKTeX Package Manager (mpm). Skipping package installation.")
-            print("You may need to restart this installer after MiKTeX finishes installing.")
+            print("Could not find MiKTeX tools. Skipping package installation.")
             return
+
+    # Update package database first!
+    print("Updating package database (this is critical)...")
+    try:
+        if use_miktex_cli:
+            subprocess.run([miktex_cmd, "packages", "update-package-database"], check=False)
+        else:
+            subprocess.run([mpm_cmd, "--update-db"], check=False)
+    except Exception as e:
+        print(f"Warning: Could not update package database: {e}")
 
     for pkg in packages:
         print(f"Installing package: {pkg}...")
         try:
-            # --install installs the package
-            subprocess.run([mpm_cmd, "--install", pkg], check=False, capture_output=False)
+            if use_miktex_cli:
+                subprocess.run([miktex_cmd, "packages", "install", pkg], check=False)
+            else:
+                subprocess.run([mpm_cmd, "--install", pkg], check=False)
         except Exception as e:
-            print(f"Warning: Could not install {pkg}. It might already be installed or network failed.")
+            print(f"Warning: Could not install {pkg}: {e}")
 
     print("Updating font maps...")
     try:
-        initexmf_cmd = "initexmf"
-        if not shutil.which(initexmf_cmd) and shutil.which(mpm_cmd):
-             initexmf_cmd = os.path.join(os.path.dirname(mpm_cmd), "initexmf.exe")
-        
-        subprocess.run([initexmf_cmd, "--update-fndb"], check=False)
-        subprocess.run([initexmf_cmd, "--mkmaps"], check=False)
+        if use_miktex_cli:
+             subprocess.run([miktex_cmd, "fndb", "refresh"], check=False)
+             subprocess.run([miktex_cmd, "fontmaps", "refresh"], check=False)
+        else:
+            initexmf_cmd = "initexmf"
+            if not shutil.which(initexmf_cmd) and shutil.which(mpm_cmd):
+                 initexmf_cmd = os.path.join(os.path.dirname(mpm_cmd), "initexmf.exe")
+            
+            subprocess.run([initexmf_cmd, "--update-fndb"], check=False)
+            subprocess.run([initexmf_cmd, "--mkmaps"], check=False)
         print("Packages and fonts updated successfully!")
     except Exception as e:
         print(f"Warning: Could not update font maps: {e}")
