@@ -43,11 +43,25 @@ Run the included `InstallPrerequisites.exe` file. It will try to install MiKTeX 
 *   Check your internet connection.
 *   If a book is very large, it might take a while.
 
+### "My antivirus says the file is a virus!"
+**Don't worry, this is a False Positive.**
+*   The `InstallPrerequisites.exe` file is a simple script that downloads MiKTeX (the PDF tool) from the internet.
+*   Because it downloads and installs software, and because it is not "digitally signed" (which costs hundreds of dollars), some antiviruses flag it as suspicious.
+*   **The code is open source.** You can check `install_prerequisites.py` to see exactly what it does.
+*   **Alternative**: If you prefer, you can install [MiKTeX](https://miktex.org/download) manually and then run the converter.
+
 ### "I want to run from source code"
-If you are a developer, you can run the Python code directly:
-1.  Install Python 3.8+.
-2.  Install dependencies: `pip install -r requirements.txt`
-3.  Run: `python run.py`
+If you don't trust the `.exe` files or are a developer, you can run the Python code directly:
+1.  Install [Python 3.8+](https://www.python.org/downloads/).
+2.  Open a terminal in the project folder.
+3.  Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+4.  Run the app:
+    ```bash
+    python run.py
+    ```
 
 ## 📄 License
 This project is licensed under the MIT License.
