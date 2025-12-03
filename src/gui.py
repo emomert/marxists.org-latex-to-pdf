@@ -10,7 +10,7 @@ import customtkinter as ctk
 
 from .scraper import MarxistsScraper
 from .latex import build_latex_document, compile_pdf
-from .utils import ensure_dir
+from .utils import ensure_dir, output_basename_from_title
 
 class App(ctk.CTk):
     def __init__(self) -> None:
@@ -177,6 +177,7 @@ class App(ctk.CTk):
             if kind == "book":
                 title, date, author, meta_entries, chapters, toc_entries = converter.scrape_book(url, self.output_dir)
                 latex = build_latex_document(title, date, author, meta_entries, chapters, is_book=True, toc_entries=toc_entries)
+                base_name = output_basename_from_title(title)
             else:
                 chapter = converter.scrape_article(url, images_dir)
                 latex = build_latex_document(
@@ -187,7 +188,8 @@ class App(ctk.CTk):
                     [chapter],
                     is_book=False,
                 )
-            tex_path = os.path.join(self.output_dir, "output.tex")
+                base_name = output_basename_from_title(chapter.title)
+            tex_path = os.path.join(self.output_dir, f"{base_name}.tex")
             with open(tex_path, "w", encoding="utf-8") as f:
                 f.write(latex)
             self.log(f"LaTeX written to {tex_path}")
@@ -202,7 +204,8 @@ class App(ctk.CTk):
                     f.write(latex_log)
                 if success:
                     self.set_progress(1.0, "Done")
-                    self.log(f"PDF created: {os.path.join(self.output_dir, 'output.pdf')}")
+                    pdf_path = os.path.join(self.output_dir, f"{base_name}.pdf")
+                    self.log(f"PDF created: {pdf_path}")
                 else:
                     self.set_progress(0.0, "xelatex failed")
                     self.log("xelatex failed; see xelatex.log in output folder.")

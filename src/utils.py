@@ -12,6 +12,18 @@ def safe_filename(name: str) -> str:
     return cleaned.strip() or "file"
 
 
+def output_basename_from_title(title: str) -> str:
+    """
+    Build a safe file basename (no extension) from a title for output files.
+    Falls back to 'output' if the cleaned title is empty.
+    """
+    cleaned = safe_filename(title)
+    cleaned = cleaned.strip("._- ")
+    if len(cleaned) > 120:
+        cleaned = cleaned[:120].rstrip("._- ")
+    return cleaned or "output"
+
+
 def escape_latex(text: str) -> str:
     """Escape special LaTeX characters in text."""
     # First escape backslashes to avoid issues with control sequences

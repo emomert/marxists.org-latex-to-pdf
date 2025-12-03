@@ -5,9 +5,9 @@ import shutil
 from datetime import datetime
 from typing import List, Optional
 
-from .scraper import MarxistsScraper
+from .scraper import MarxistsScraper, DEFAULT_REQUEST_DELAY
 from .latex import build_latex_document, compile_pdf
-from .utils import ensure_dir
+from .utils import ensure_dir, output_basename_from_title
 from .gui import App
 
 def cli_main(argv: Optional[List[str]] = None) -> int:
@@ -17,7 +17,7 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
     Examples:
       python run.py --url https://www.marxists.org/... --output-dir ./out
     """
-    parser = argparse.ArgumentParser(description="Marxists.org → LaTeX → PDF converter (CLI)")
+    parser = argparse.ArgumentParser(description="Marxists.org to LaTeX to PDF converter (CLI)")
     parser.add_argument("--url", required=True, help="Marxists.org article or index URL")
     parser.add_argument(
         "--output-dir",
@@ -32,8 +32,13 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--delay",
         type=float,
-        default=0.0,
-        help="Seconds to sleep between HTTP requests (default: 0)",
+        default=DEFAULT_REQUEST_DELAY,
+        help=f"Seconds to sleep between HTTP requests (default: {DEFAULT_REQUEST_DELAY})",
+    )
+    parser.add_argument(
+        "--allow-guessing",
+        action="store_true",
+        help="Enable chapter guessing when links are missing (may issue many HTTP requests).",
     )
     args = parser.parse_args(argv)
 
@@ -56,7 +61,12 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
     ensure_dir(images_dir)
 
     try:
-        converter = MarxistsScraper(log_fn, progress_fn, request_delay=args.delay)
+        converter = MarxistsScraper(
+            log_fn,
+            progress_fn,
+            request_delay=args.delay,
+            allow_guessing=args.allow_guessing,
+        )
         log_fn(f"Analyzing {url}...")
         kind = converter.analyze_url(url)
         log_fn(f"Detected: {kind}")
@@ -64,6 +74,7 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
         if kind == "book":
             title, date, author, meta_entries, chapters, toc_entries = converter.scrape_book(url, output_dir)
             latex = build_latex_document(title, date, author, meta_entries, chapters, is_book=True, toc_entries=toc_entries)
+            base_name = output_basename_from_title(title)
         else:
             chapter = converter.scrape_article(url, images_dir)
             latex = build_latex_document(
@@ -74,8 +85,9 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
                 [chapter],
                 is_book=False,
             )
+            base_name = output_basename_from_title(chapter.title)
         
-        tex_path = os.path.join(output_dir, "output.tex")
+        tex_path = os.path.join(output_dir, f"{base_name}.tex")
         with open(tex_path, "w", encoding="utf-8") as f:
             f.write(latex)
         log_fn(f"LaTeX written to {tex_path}")
@@ -90,7 +102,8 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
                 f.write(latex_log)
             
             if success:
-                log_fn(f"PDF created: {os.path.join(output_dir, 'output.pdf')}")
+                pdf_path = os.path.join(output_dir, f"{base_name}.pdf")
+                log_fn(f"PDF created: {pdf_path}")
             else:
                 log_fn("PDF compilation failed. See xelatex.log.")
                 return 1

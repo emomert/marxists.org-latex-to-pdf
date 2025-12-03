@@ -25,18 +25,23 @@ from .utils import (
 )
 from .latex import clean_latex_spacing, break_long_lines
 
+DEFAULT_REQUEST_DELAY = 0.35  # seconds between requests to be polite to marxists.org
+
 class MarxistsScraper:
     def __init__(
         self,
         log_fn: Callable[[str], None],
         progress_fn: Callable[[float, str], None],
         session: Optional[requests.Session] = None,
-        request_delay: float = 0.0,
+        request_delay: float = DEFAULT_REQUEST_DELAY,
+        allow_guessing: bool = False,
     ):
         self.log_fn = log_fn
         self.progress_fn = progress_fn
         self.session = session or self._build_session()
         self.request_delay = max(0.0, request_delay)
+        self.allow_guessing = allow_guessing
+        self._last_footnote_stats: Dict[str, int] = {}
 
     def _build_session(self) -> requests.Session:
         """Create a requests session with retry/backoff and a polite User-Agent."""
@@ -65,9 +70,17 @@ class MarxistsScraper:
             resp = self.session.get(url, timeout=20)
             resp.raise_for_status()
             content_type = resp.headers.get("content-type", "")
+            # Ensure proper UTF-8 encoding handling
+            # Try to decode as UTF-8 first, with fallback to detected encoding
+            try:
+                html_content = resp.content.decode('utf-8', errors='replace')
+            except (UnicodeDecodeError, AttributeError):
+                # Fallback: use requests' automatic encoding detection
+                resp.encoding = resp.apparent_encoding or 'utf-8'
+                html_content = resp.text
             if self.request_delay:
                 time.sleep(self.request_delay)
-            return resp.text, content_type
+            return html_content, content_type
         except requests.RequestException as exc:
             self.log_fn(f"Request failed for {url}: {exc}")
             raise
@@ -82,8 +95,17 @@ class MarxistsScraper:
         # heuristic: many links in content section
         html, _ = self.fetch(url)
         soup = BeautifulSoup(html, "html.parser")
-        links = [a for a in soup.find_all("a", href=True) if self._is_chapter_link(a["href"])]
-        return "book" if len(links) >= 8 else "article"
+        base_dir = "/".join(url.split("/")[:-1]) + "/"
+        chapterish_links = []
+        for a in soup.find_all("a", href=True):
+            full = normalize_href(a["href"], url)
+            if not full:
+                continue
+            if not full.startswith(base_dir):
+                continue
+            if self._is_chapter_link(full):
+                chapterish_links.append(full)
+        return "book" if len(chapterish_links) >= 4 else "article"
 
     # ---- scraping ----
     def scrape_article(
@@ -94,6 +116,7 @@ class MarxistsScraper:
         self._strip_unwanted(soup)
         footnotes = self._extract_footnotes(soup)
         self._inline_footnote_refs(soup, footnotes)
+        self._inline_manual_footnote_refs(soup, footnotes)  # Handle manual [1], [2] references
         self._remove_artifact_nodes(soup)
         content_node = self._select_content_node(soup)
         meta_title, meta_date, author, meta_entries = self._extract_metadata(soup, content_node, url)
@@ -113,6 +136,11 @@ class MarxistsScraper:
         # Break very long lines to avoid xelatex buffer overflow
         latex_body = clean_latex_spacing(latex_body)
         latex_body = break_long_lines(latex_body)
+        if self._last_footnote_stats:
+            extracted = self._last_footnote_stats.get("extracted", 0)
+            inlined = self._last_footnote_stats.get("inlined", 0)
+            unmatched = self._last_footnote_stats.get("unmatched_refs", 0)
+            self.log_fn(f"Footnotes: extracted {extracted}, inlined {inlined}, unmatched refs {unmatched}.")
         return ArticleContent(
             title=chapter_title,
             date=meta_date,
@@ -138,11 +166,14 @@ class MarxistsScraper:
         # Try to detect higher-level "Part ..." groupings on the index page
         part_map = self._detect_parts_for_index(content_node, index_url, chapter_links)
         if len(chapter_links) < 3 and not toc_urls:
-            guessed = self._guess_chapter_sequence(index_url, limit=80)
-            self.log_fn(f"No or few chapters found; using guessed sequence ({len(guessed)} links).")
-            if guessed:
-                self.log_fn("Chapters guessed: " + ", ".join(guessed[:6]) + (" ..." if len(guessed) > 6 else ""))
-            chapter_links = guessed
+            if self.allow_guessing:
+                guessed = self._guess_chapter_sequence(index_url, limit=40)
+                self.log_fn(f"No or few chapters found; using guessed sequence ({len(guessed)} links).")
+                if guessed:
+                    self.log_fn("Chapters guessed: " + ", ".join(guessed[:6]) + (" ..." if len(guessed) > 6 else ""))
+                chapter_links = guessed
+            else:
+                self.log_fn("No or few chapters found; chapter guessing disabled.")
         if not chapter_links:
             raise RuntimeError("No chapter links detected or guessed.")
         
@@ -193,6 +224,7 @@ class MarxistsScraper:
         chapters: List[ArticleContent] = []
         total = len(all_links)
         images_dir = os.path.join(work_dir, "images")
+        failed_chapters = 0
         for idx, (link, toc_title, is_external) in enumerate(all_links, start=1):
             label_hint = toc_title or os.path.basename(urlparse(link).path) or f"Chapter {idx}"
             self.progress_fn(idx / total, f"Scraping {idx}/{total}: {label_hint[:60]}")
@@ -201,6 +233,7 @@ class MarxistsScraper:
                 chapter = self.scrape_article(link, images_dir, book_title=title, book_author=author)
             except Exception as exc:  # noqa: BLE001
                 self.log_fn(f"Failed chapter {link}: {exc}")
+                failed_chapters += 1
                 continue
             if not chapter.title:
                 chapter.title = f"Chapter {idx}"
@@ -215,11 +248,15 @@ class MarxistsScraper:
             # Attach part title if this link was associated with a "Part ..." heading
             chapter.part_title = part_map.get(canonical_url(link))
             chapters.append(chapter)
-        
+
         # Validate that we have at least one chapter
         if not chapters:
             raise RuntimeError("No chapters were successfully scraped. All chapters failed or were empty.")
-        
+        if failed_chapters:
+            self.log_fn(f"Warning: {failed_chapters} of {total} chapters failed to scrape.")
+        else:
+            self.log_fn(f"Chapters scraped successfully: {len(chapters)}/{total}.")
+
         return title or "Collected Works", date, author, meta_entries, chapters, toc_entries
 
     # ---- internal helpers ----
@@ -488,6 +525,7 @@ class MarxistsScraper:
         title = ""
         date = None
         author = None
+        author_source = None
         meta_entries: List[Tuple[str, str]] = []
 
         if content_node:
@@ -497,7 +535,10 @@ class MarxistsScraper:
             
             h2_tag = content_node.find("h2")
             if h2_tag:
-                author = h2_tag.get_text(" ", strip=True)
+                candidate = h2_tag.get_text(" ", strip=True)
+                if candidate and len(candidate.split()) <= 5:
+                    author = candidate
+                    author_source = "heading"
             if not author:
                 non_author_keywords = ["background", "table of contents", "contents", "foreword", "preface", "introduction"]
                 for h4_tag in content_node.find_all("h4"):
@@ -507,17 +548,15 @@ class MarxistsScraper:
                     author_match = re.match(r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)(?:\s+\d{4})?$", h4_text)
                     if author_match:
                         author = author_match.group(1)
+                        author_source = "subheading"
                         break
-            if not author:
-                first_text = content_node.get_text(" ", strip=True)[:200]
-                author_match = re.match(r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)(?:\s+\d{4})?", first_text)
-                if author_match:
-                    author = author_match.group(1)
-        
+
         if not title and soup.title:
             title = soup.title.get_text(strip=True)
         if not author:
             author = self._author_from_url(url)
+            if author:
+                author_source = "url"
 
         meta_keys = [
             "Written", "Published", "First Published", "Source", "Publisher", 
@@ -601,7 +640,12 @@ class MarxistsScraper:
         )
         if date_candidate:
             date = date_candidate.strip()
-        return title or "Untitled", date, author, meta_entries
+        if author_source:
+            self.log_fn(f"Author detected from {author_source}: {author}")
+        elif not author:
+            self.log_fn("Author not detected; leaving as Unknown.")
+
+        return title or "Untitled", date, author or "Unknown", meta_entries
 
     def _extract_footnotes(self, soup: BeautifulSoup) -> Dict[str, str]:
         footnotes: Dict[str, str] = {}
@@ -624,7 +668,12 @@ class MarxistsScraper:
                     if re.match(r"^(MIA|Archive).*>(Archive|.*>.*)", text, re.I):
                         continue
 
-                    footnote_match = re.match(r"^(\*+)?\s*(\d+)\.?\s*(.+)$", text, re.S)
+                    # Try pattern like "1. text", "[1] text", or just "[1] text"
+                    footnote_match = re.match(r"^(\*+)?\s*\[?(\d+)\]?\.?\s*(.+)$", text, re.S)
+                    if not footnote_match:
+                        # Also try pattern starting with just "[1]" followed by text
+                        footnote_match = re.match(r"^\[(\d+)\]\s*(.+)$", text, re.S)
+                    
                     if footnote_match:
                         footnote_num = footnote_match.group(2)
                         footnote_text = footnote_match.group(3)
@@ -799,6 +848,75 @@ class MarxistsScraper:
                 footnotes[key] = clean_text
                 target.decompose()
                 
+        # Add fallback: extract footnotes from paragraphs that start with [1], [2], etc.
+        footnotes_heading = soup.find(string=re.compile(r"^(Footnotes?|Notes?)$", re.I))
+        if footnotes_heading:
+            heading_elem = footnotes_heading.find_parent()
+            if heading_elem:
+                # Look for paragraphs starting with [1], [2], etc. that we might have missed
+                for elem in heading_elem.find_all_next(["p", "li"], limit=50):
+                    parent_heading = elem.find_previous(["h1", "h2", "h3", "h4", "h5", "h6"])
+                    if parent_heading and parent_heading is not heading_elem:
+                        heading_text = parent_heading.get_text(strip=True).lower()
+                        if heading_text and "footnote" not in heading_text and "note" not in heading_text:
+                            break
+                    
+                    text = elem.get_text(strip=True)
+                    if not text or len(text) < MIN_FOOTNOTE_TEXT_LENGTH:
+                        continue
+                    
+                    # Try to match "[1] text" pattern
+                    bracket_match = re.match(r"^\[(\d+)\]\s*(.+)$", text, re.S)
+                    if bracket_match:
+                        num = bracket_match.group(1)
+                        content = clean_text_fragments(bracket_match.group(2))
+                        if content and len(content) < MAX_FOOTNOTE_LENGTH:
+                            # Store with multiple key variations
+                            for key_variant in [num, f"n{num}", f"note{num}", f"footnote{num}"]:
+                                if key_variant.lower() not in footnotes:
+                                    footnotes[key_variant.lower()] = content
+        
+        # Extract footnotes from table structures (common in Marxists.org)
+        # Look for tables after footnote heading with anchors in first cell and content in second
+        if footnotes_heading:
+            heading_elem = footnotes_heading.find_parent()
+            if heading_elem:
+                for table in heading_elem.find_all_next("table", limit=50):
+                    parent_heading = table.find_previous(["h1", "h2", "h3", "h4", "h5", "h6"])
+                    if parent_heading and parent_heading is not heading_elem:
+                        heading_text = parent_heading.get_text(strip=True).lower()
+                        if heading_text and "footnote" not in heading_text and "note" not in heading_text:
+                            break
+                    
+                    rows = table.find_all("tr")
+                    for row in rows:
+                        cells = row.find_all(["td", "th"])
+                        if len(cells) >= 2:
+                            # First cell contains anchor, second cell contains content
+                            anchor_cell = cells[0]
+                            content_cell = cells[1]
+                            
+                            anchor = anchor_cell.find("a", attrs={"id": True}) or anchor_cell.find("a", attrs={"name": True})
+                            if anchor:
+                                anchor_id = anchor.get("id") or anchor.get("name")
+                                if anchor_id:
+                                    # Extract content from second cell
+                                    content_text = clean_text_fragments(content_cell.get_text("\n", strip=True))
+                                    # Remove the anchor number prefix if present
+                                    content_text = re.sub(r"^\[?\d+\]?\.?\s*", "", content_text).strip()
+                                    
+                                    if content_text and len(content_text) < MAX_FOOTNOTE_LENGTH:
+                                        key = anchor_id.lower()
+                                        if key not in footnotes:
+                                            footnotes[key] = content_text
+                                        # Also add numeric variants
+                                        num_match = re.search(r"(\d+)", key)
+                                        if num_match:
+                                            num = num_match.group(1)
+                                            for variant in [num, f"n{num}", f"note{num}", f"footnote{num}"]:
+                                                if variant not in footnotes:
+                                                    footnotes[variant] = content_text
+        
         normalized: Dict[str, str] = {}
         for key, text in footnotes.items():
             k = key.lower()
@@ -806,19 +924,26 @@ class MarxistsScraper:
             num_match = re.search(r"(\d+)", k)
             if num_match:
                 num = num_match.group(1)
-                for alt in (num, f"n{num}", f"note{num}", f"footnote{num}"):
+                for alt in (num, f"n{num}", f"note{num}", f"footnote{num}", f"fn{num}"):
                     normalized.setdefault(alt, text)
             for prefix in ("fw", "bk"):
                 if k.startswith(prefix):
                     stripped = k[len(prefix):]
                     if stripped:
                         normalized.setdefault(stripped, text)
+
+        self._last_footnote_stats = {
+            "extracted": len(normalized),
+        }
         return normalized
 
     def _match_footnote_content(self, ref: Tag, footnotes: Dict[str, str]) -> Optional[str]:
         href = ref.get("href", "")
         link_text = ref.get_text(" ", strip=True)
         href_lower = href.lower()
+
+        if href_lower in ("#top", "#toc"):
+            return None
 
         if href_lower.startswith("#s") or href_lower.startswith("#fig"):
             return None
@@ -858,6 +983,8 @@ class MarxistsScraper:
 
     def _inline_footnote_refs(self, soup: BeautifulSoup, footnotes: Dict[str, str]) -> None:
         unmatched_examples: List[str] = []
+        matched = 0
+        unmatched = 0
         for ref in soup.find_all("a", href=True):
             href = ref["href"]
             if not href.startswith("#"):
@@ -869,7 +996,9 @@ class MarxistsScraper:
                 placeholder = soup.new_tag("latexfootnote")
                 placeholder["content"] = content
                 ref.replace_with(placeholder)
+                matched += 1
             else:
+                unmatched += 1
                 if len(unmatched_examples) < 5 and not href.lower().startswith("#s"):
                     text_preview = ref.get_text(" ", strip=True)[:40]
                     unmatched_examples.append(f"{href} ({text_preview})")
@@ -878,6 +1007,130 @@ class MarxistsScraper:
         if unmatched_examples:
             sample = "; ".join(unmatched_examples)
             self.log_fn(f"Warning: {len(unmatched_examples)} footnote references had no match: {sample}")
+        self._last_footnote_stats["inlined"] = matched
+        self._last_footnote_stats["unmatched_refs"] = unmatched
+
+    def _inline_manual_footnote_refs(self, soup: BeautifulSoup, footnotes: Dict[str, str]) -> None:
+        """
+        Find and replace manual footnote references like [1], [2] in text nodes
+        that aren't clickable links, matching them with extracted footnotes.
+        """
+        # Pattern to match footnote references like [1], [2], etc. in text
+        footnote_pattern = re.compile(r'\[(\d+)\]')
+        
+        manual_matched = 0
+        manual_unmatched = []
+        
+        # Get content node
+        content_node = self._select_content_node(soup)
+        if not content_node:
+            return
+        
+        # Process text nodes - need to collect first, then replace (can't modify during iteration)
+        text_nodes_to_process = []
+        for text_node in content_node.descendants:
+            if not isinstance(text_node, NavigableString):
+                continue
+            parent = text_node.find_parent()
+            if not parent:
+                continue
+            # Skip if inside script, style, or link
+            if parent.name in ['script', 'style']:
+                continue
+            if parent.find_parent('a'):
+                continue
+            # Skip footnote sections
+            footnote_parent = parent.find_parent(class_=re.compile(r'(footnote|endnote|note)', re.I))
+            if footnote_parent:
+                continue
+            
+            text = str(text_node.string)
+            if '[' in text and ']' in text:
+                matches = list(footnote_pattern.finditer(text))
+                if matches:
+                    text_nodes_to_process.append((text_node, parent, text, matches))
+        
+        # Process collected text nodes
+        for text_node, parent, text, matches in text_nodes_to_process:
+            parts = []
+            last_pos = 0
+            matched_any = False
+            
+            for match in matches:
+                # Add text before this match
+                if match.start() > last_pos:
+                    parts.append(NavigableString(text[last_pos:match.start()]))
+                
+                # Extract footnote number
+                footnote_num = match.group(1)
+                
+                # Try to find matching footnote content - check all possible key variations
+                footnote_content = None
+                # Try various key formats that might be in the normalized dictionary
+                key_variants = [
+                    footnote_num,  # "1"
+                    f"n{footnote_num}",  # "n1"
+                    f"note{footnote_num}",  # "note1"
+                    f"footnote{footnote_num}",  # "footnote1"
+                    f"#{footnote_num}",  # "#1"
+                    f"fn{footnote_num}",  # "fn1"
+                ]
+                
+                # Check each variant (case-insensitive)
+                for key in key_variants:
+                    key_lower = key.lower()
+                    if key_lower in footnotes:
+                        footnote_content = footnotes[key_lower]
+                        break
+                
+                # If still not found, try searching for any key containing the number
+                if not footnote_content:
+                    for key, value in footnotes.items():
+                        # Check if key contains just the number (like "1" or ends with "1")
+                        if key == footnote_num or key == f"n{footnote_num}":
+                            footnote_content = value
+                            break
+                        # Check if key has the number in it
+                        if re.search(rf'\b{footnote_num}\b', key):
+                            num_in_key = re.search(r'(\d+)', key)
+                            if num_in_key and num_in_key.group(1) == footnote_num:
+                                footnote_content = value
+                                break
+                
+                if footnote_content:
+                    # Create placeholder tag for endnote
+                    placeholder = soup.new_tag("latexfootnote")
+                    placeholder["content"] = footnote_content
+                    parts.append(placeholder)
+                    manual_matched += 1
+                    matched_any = True
+                else:
+                    # Keep original if no match
+                    parts.append(NavigableString(match.group(0)))
+                    if len(manual_unmatched) < 5:
+                        manual_unmatched.append(f"[{footnote_num}]")
+                        # Debug: log available footnote keys
+                        if len(manual_unmatched) == 1:
+                            available_keys = list(footnotes.keys())[:10]
+                            self.log_fn(f"Debug: Available footnote keys (first 10): {available_keys}")
+                
+                last_pos = match.end()
+            
+            # Add remaining text
+            if last_pos < len(text):
+                parts.append(NavigableString(text[last_pos:]))
+            
+            # Replace the text node if we made any replacements
+            if matched_any:
+                text_node.extract()
+                for part in parts:
+                    parent.append(part)
+        
+        if manual_unmatched:
+            self.log_fn(f"Warning: {len(manual_unmatched)} manual footnote references had no match: {', '.join(manual_unmatched[:5])}")
+        if manual_matched > 0:
+            self.log_fn(f"Converted {manual_matched} manual footnote references to endnotes.")
+            self._last_footnote_stats["inlined"] = self._last_footnote_stats.get("inlined", 0) + manual_matched
 
     def _handle_images(self, soup: BeautifulSoup, node: Tag, page_url: str, images_dir: str) -> None:
         if not node:
@@ -900,26 +1153,6 @@ class MarxistsScraper:
         def convert_children(tag: Tag) -> str:
             return "".join(self._html_to_latex(child, base_url) for child in tag.children)
 
-        def strip_trailing_breaks(text: str) -> str:
-            text = text.rstrip()
-            text = re.sub(r"(\\\\\\s*)+$", "", text)
-            return text
-
-        def strip_leading_breaks(text: str) -> str:
-            text = text.lstrip()
-            text = re.sub(r"^(\\\\\s*)+", "", text)
-            return text
-
-        def normalize_block(text: str) -> str:
-            text = text or ""
-            text = strip_leading_breaks(strip_trailing_breaks(text))
-            lines = text.splitlines()
-            while lines and not lines[0].strip():
-                lines.pop(0)
-            while lines and not lines[-1].strip():
-                lines.pop()
-            return "\n".join(lines)
-
         if name == "latexfootnote":
             content = clean_text_fragments(element.get("content", ""))
             if not content:
@@ -938,13 +1171,13 @@ class MarxistsScraper:
         if name in ["p", "div", "center"]:
             classes = element.get("class", [])
             if classes and any("quote" in c.lower() for c in classes):
-                body = normalize_block(convert_children(element))
+                body = self._normalize_block(convert_children(element))
                 return "\\begin{quoting}\n" + body + "\n\\end{quoting}\n\n"
             if classes and any("indentb" in c.lower() for c in classes):
                 raw = convert_children(element)
                 lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
-                body = " \\\\\n".join(lines)
-                body = normalize_block(body)
+                body = " \\\\n".join(lines)
+                body = self._normalize_block(body)
                 return "\\begin{quote}\n" + body + "\n\\end{quote}\n\n"
             if classes and any("inline" == c.lower() for c in classes):
                 content = convert_children(element)
@@ -961,84 +1194,12 @@ class MarxistsScraper:
             if classes and any("inline" == c.lower() for c in classes):
                 return f"\\begin{{flushright}}{convert_children(element)}\\end{{flushright}}"
             return convert_children(element)
-        
-        def clean_heading_content(raw: str) -> str:
-            cleaned = re.sub(r"\\endnote\{[^}]*\}", "", raw)
-            cleaned = re.sub(r"\s*>>\s*", "", cleaned)
-            cleaned = re.sub(r"\s*<<\s*", "", cleaned)
-            cleaned = re.sub(r"\\href\{[^}]+\}\{[^}]+\}", "", cleaned)
-            cleaned = re.sub(r"\s*\|\s*", " ", cleaned)
-            if re.match(r"^(MIA|Archive).*>(Archive|.*>.*)", cleaned, re.I):
-                return ""
-            if re.match(r"^Top\s+of\s+the\s+page\s*$", cleaned, re.I):
-                return ""
-            cleaned = re.sub(r"\s+", " ", cleaned).strip()
-            return cleaned
-        
-        def is_navigation_heading(elem: Tag) -> bool:
-            raw_text = elem.get_text(strip=True)
-            has_nav_arrows = ">>" in raw_text or "<<" in raw_text
-            has_nav_text = "top of the page" in raw_text.lower()
-            has_nav_links = len(elem.find_all("a", href=True)) > 0 and ("contents" in raw_text.lower() or "page" in raw_text.lower())
-            return has_nav_arrows or has_nav_text or has_nav_links
-        
-        if name == "h1":
-            heading_text = element.get_text(strip=True).lower()
-            if heading_text in ["notes", "note", "footnotes", "endnotes"]:
-                return ""
-            if is_navigation_heading(element):
-                return ""
-            content = clean_heading_content(convert_children(element))
-            if not content:
-                return ""
-            content = content.replace("\n", " ").replace("\r", " ").strip()
-            return f"\\section*{{{content}}}\n\n"
-        if name == "h2":
-            heading_text = element.get_text(strip=True).lower()
-            if heading_text in ["notes", "note", "footnotes", "endnotes"]:
-                return ""
-            if is_navigation_heading(element):
-                return ""
-            content = clean_heading_content(convert_children(element))
-            if not content:
-                return ""
-            content = content.replace("\n", " ").replace("\r", " ").strip()
-            return f"\\subsection*{{{content}}}\n\n"
-        if name == "h3":
-            heading_text = element.get_text(strip=True).lower()
-            if heading_text in ["notes", "note", "footnotes", "endnotes"]:
-                return ""
-            if is_navigation_heading(element):
-                return ""
-            content = clean_heading_content(convert_children(element))
-            if not content:
-                return ""
-            content = content.replace("\n", " ").replace("\r", " ").strip()
-            return f"\\subsubsection*{{{content}}}\n\n"
-        if name == "h4":
-            heading_text = element.get_text(strip=True).lower()
-            if heading_text in ["notes", "note", "footnotes", "endnotes"]:
-                return ""
-            if is_navigation_heading(element):
-                return ""
-            content = clean_heading_content(convert_children(element))
-            if not content:
-                return ""
-            content = content.replace("\n", " ").replace("\r", " ").strip()
-            return f"\\subsection*{{{content}}}\n\n"
-        if name == "h5" or name == "h6":
-            heading_text = element.get_text(strip=True).lower()
-            if heading_text in ["notes", "note", "footnotes", "endnotes"]:
-                return ""
-            if is_navigation_heading(element):
-                return ""
-            content = clean_heading_content(convert_children(element))
-            if not content:
-                return ""
-            content = content.replace("\n", " ").replace("\r", " ").strip()
-            return f"\\paragraph*{{{content}}}\\mbox{{}}\\\\\n\n"
+
+        if name in ["h1", "h2", "h3", "h4", "h5", "h6"]:
+            level = int(name[1])
+            return self._convert_heading(element, level, convert_children)
         if name == "blockquote":
-            body = normalize_block(convert_children(element))
+            body = self._normalize_block(convert_children(element))
             if "\\begin{quoting}" in body:
                 return body + "\n\n"
             return "\\begin{quoting}\n" + body + "\n\\end{quoting}\n\n"
@@ -1051,166 +1212,8 @@ class MarxistsScraper:
         if name == "li":
             return "\\item " + convert_children(element) + "\n"
         if name == "table":
-            table_class = element.get("class", [])
-            if table_class and any("foot" in c.lower() or "nav" in c.lower() for c in table_class):
-                return ""
-            
-            nested_inner = element.find("table")
-            if nested_inner:
-                inner_rows = []
-                for row in nested_inner.find_all("tr"):
-                    cells = row.find_all(["td", "th"])
-                    if len(cells) >= 2:
-                        left_cell = cells[0]
-                        left_text = clean_text_fragments(left_cell.get_text(" ", strip=True))
-                        right_cell = cells[1]
-                        right_text = clean_text_fragments(right_cell.get_text(" ", strip=True))
-                        if left_text or right_text:
-                            left_escaped = escape_latex(left_text)
-                            right_escaped = escape_latex(right_text)
-                            inner_rows.append((left_escaped, right_escaped))
-                
-                right_side_text = ""
-                outer_rows = element.find_all("tr", recursive=False)
-                for outer_row in outer_rows:
-                    tds = outer_row.find_all("td", recursive=False)
-                    for td in tds:
-                        if td.find("table"):
-                            continue
-                        bgcolor = td.get("bgcolor", "")
-                        width = td.get("width", "")
-                        is_separator = False
-                        if bgcolor:
-                            is_separator = True
-                        elif width:
-                            width_val = width.replace("px", "").replace("%", "").strip()
-                            try:
-                                if float(width_val) <= 2:
-                                    is_separator = True
-                            except (ValueError, TypeError):
-                                pass
-                        
-                        if is_separator:
-                            continue
-                        
-                        txt = clean_text_fragments(td.get_text(" ", strip=True))
-                        if txt and txt.strip():
-                            right_side_text = escape_latex(txt.strip())
-                            break
-                    if right_side_text:
-                        break
-                
-                if inner_rows and right_side_text:
-                    num_rows = len(inner_rows)
-                    table_rows = []
-                    for i, (left_val, right_val) in enumerate(inner_rows):
-                        if i == 0:
-                            table_rows.append(
-                                f"{left_val} & {right_val} & \\multirow{{{num_rows}}}{{*}}{{{right_side_text}}}"
-                            )
-                        else:
-                            table_rows.append(f"{left_val} & {right_val} &")
-                    
-                    table_content = " \\\\\n".join(table_rows)
-                    
-                    return (
-                        "\\begin{center}\n"
-                        "\\begin{tabular}{r|l@{\\hspace{0.3em}}|@{\\hspace{0.3em}}l}\n"
-                        f"{table_content} \\\\\n"
-                        "\\end{tabular}\n"
-                        "\\end{center}\n\n"
-                    )
-                elif inner_rows:
-                    left_column_lines = []
-                    for left_val, right_val in inner_rows:
-                        left_column_lines.append(f"{left_val} & {right_val}")
-                    left_column_content = " \\\\\n".join(left_column_lines)
-                    return (
-                        "\\begin{center}\n"
-                        "\\begin{tabular}{r|l}\n"
-                        f"{left_column_content} \\\\\n"
-                        "\\end{tabular}\n"
-                        "\\end{center}\n\n"
-                    )
-
-            rows = element.find_all("tr")
-            if not rows:
-                return ""
-
-            if len(rows) == 1:
-                cells = rows[0].find_all(["td", "th"])
-                if len(cells) == 1:
-                    cell_content = convert_children(cells[0])
-                    if cell_content.strip():
-                        parent = element.find_parent("blockquote")
-                        if parent:
-                            return normalize_block(cell_content) + "\n\n"
-                        return "\\begin{quoting}\n" + normalize_block(cell_content) + "\n\\end{quoting}\n\n"
-
-            def is_section_list_table(rows_list):
-                if len(rows_list) < 2:
-                    return False
-                section_count = 0
-                list_count = 0
-                for row in rows_list:
-                    cells = row.find_all(["td", "th"], recursive=False)
-                    if len(cells) == 1 and cells[0].get("colspan") == "2":
-                        continue
-                    if row.find("hr"):
-                        continue
-                    if len(cells) == 2:
-                        left_text = cells[0].get_text(strip=True)
-                        right_elem = cells[1]
-                        if re.match(r"^[IVX]+\.\s+[A-Z\s]+$", left_text.strip()):
-                            section_count += 1
-                        if right_elem.find("ol"):
-                            list_count += 1
-                return section_count >= 1 and list_count >= 1
-            
-            if is_section_list_table(rows):
-                table_rows = []
-                for row in rows:
-                    cells = row.find_all(["td", "th"], recursive=False)
-                    if len(cells) == 1 and cells[0].get("colspan") == "2":
-                        table_rows.append("\\hline")
-                        continue
-                    if row.find("hr"):
-                        table_rows.append("\\hline")
-                        continue
-                    
-                    if len(cells) == 2:
-                        left_content = convert_children(cells[0])
-                        left_content_clean = escape_latex(left_content.strip())
-                        if re.match(r"^[IVX]+\.?\s*[A-Z\s]+$", left_content_clean, re.I):
-                            left_content_clean = f"\\textbf{{{left_content_clean}}}"
-                        right_content = convert_children(cells[1])
-                        right_content = normalize_block(right_content)
-                        table_rows.append(f"{left_content_clean} & {right_content} \\\\")
-                
-                if table_rows:
-                    table_content = "\n".join(table_rows)
-                    return (
-                        "\\begin{center}\n"
-                        "\\begin{tabular}{>{\\raggedleft\\arraybackslash}p{0.22\\textwidth}|p{0.73\\textwidth}}\n"
-                        "\\renewcommand{\\arraystretch}{1.1}\n"
-                        "\\setlength{\\tabcolsep}{0.8em}\n"
-                        f"{table_content}\n"
-                        "\\end{tabular}\n"
-                        "\\end{center}\n\n"
-                    )
-
-            if self._is_numbered_list_table(rows):
-                result = self._convert_numbered_list_table(rows)
-                if result:
-                    return result
-            
-            parent = element.find_parent("blockquote")
-            in_blockquote = parent is not None
-            
-            return self._table_to_text(element, in_blockquote=in_blockquote)
-        if name in ["tbody", "thead", "tfoot"]:
-            return convert_children(element)
-        if name in ["tr", "td", "th"]:
+            return self._convert_table(element, convert_children)
+        if name in ["tbody", "thead", "tfoot", "tr", "td", "th"]:
             return convert_children(element)
         if name == "a":
             href = element.get("href")
@@ -1227,11 +1230,305 @@ class MarxistsScraper:
             return text
         return convert_children(element)
 
+    def _convert_heading(self, element: Tag, level: int, convert_children):
+        heading_text = element.get_text(strip=True).lower()
+        if heading_text in ["notes", "note", "footnotes", "endnotes"]:
+            return ""
+        if self._is_navigation_heading(element):
+            return ""
+        content = self._clean_heading_content(convert_children(element))
+        if not content:
+            return ""
+        content = content.replace("\n", " ").replace("\r", " ").strip()
+        if level == 1:
+            return f"\\section*{{{content}}}\n\n"
+        if level == 2:
+            return f"\\subsection*{{{content}}}\n\n"
+        if level == 3:
+            return f"\\subsubsection*{{{content}}}\n\n"
+        if level == 4:
+            return f"\\subsection*{{{content}}}\n\n"
+        return f"\\paragraph*{{{content}}}\\mbox{{}}\\\\\n\n"
+
+    def _convert_table(self, element: Tag, convert_children):
+        table_class = element.get("class", [])
+        if table_class and any("foot" in c.lower() or "nav" in c.lower() for c in table_class):
+            return ""
+
+        # If the table contains lists, it's usually a structured outline; render as text to avoid LaTeX alignment issues.
+        if element.find(["ol", "ul", "li"]):
+            return self._table_to_text(element, in_blockquote=bool(element.find_parent("blockquote")))
+
+        nested_inner = element.find("table")
+        if nested_inner:
+            # Nested tables (often value-form diagrams) show up in Marx's value-form sections; try a structured rendering first.
+            rendered = self._convert_nested_value_form_table(element, convert_children)
+            if rendered:
+                return rendered
+            return self._table_to_text(element, in_blockquote=bool(element.find_parent("blockquote")))
+
+        rows = element.find_all("tr")
+        if not rows:
+            return ""
+
+        if len(rows) == 1:
+            cells = rows[0].find_all(["td", "th"])
+            if len(cells) == 1:
+                cell = cells[0]
+                parent = element.find_parent("blockquote")
+                # Check if this is poetry BEFORE converting to preserve structure
+                if self._is_poetry_cell(cell):
+                    formatted_content = self._extract_and_format_poetry(cell)
+                    if parent:
+                        return f"{formatted_content}\n\n"
+                    return "\\begin{center}\n\\begin{quoting}\n" + formatted_content + "\n\\end{quoting}\n\\end{center}\n\n"
+                else:
+                    # Normal table cell formatting
+                    cell_content = convert_children(cell)
+                    if cell_content.strip():
+                        if parent:
+                            return self._normalize_block(cell_content) + "\n\n"
+                        return "\\begin{quoting}\n" + self._normalize_block(cell_content) + "\n\\end{quoting}\n\n"
+                    return ""
+
+        if self._is_section_list_table(rows, convert_children):
+            table_rows = []
+            for row in rows:
+                cells = row.find_all(["td", "th"], recursive=False)
+                if len(cells) == 1 and cells[0].get("colspan") == "2":
+                    table_rows.append("\\hline")
+                    continue
+                if row.find("hr"):
+                    table_rows.append("\\hline")
+                    continue
+
+                if len(cells) == 2:
+                    left_content = convert_children(cells[0])
+                    left_content_clean = escape_latex(left_content.strip())
+                    if re.match(r"^[IVX]+\.\s*[A-Z\s]+$", left_content_clean, re.I):
+                        left_content_clean = f"\\textbf{{{left_content_clean}}}"
+                    right_content = convert_children(cells[1])
+                    right_content = self._normalize_block(right_content)
+                    table_rows.append(f"{left_content_clean} & {right_content} \\\\")
+
+            if table_rows:
+                table_content = "\n".join(table_rows)
+                return (
+                    "\\begin{center}\n"
+                    "\\begin{tabular}{>{\\raggedleft\\arraybackslash}p{0.22\\textwidth}|p{0.73\\textwidth}}\n"
+                    "\\renewcommand{\\arraystretch}{1.1}\n"
+                    "\\setlength{\\tabcolsep}{0.8em}\n"
+                    f"{table_content}\n"
+                    "\\end{tabular}\n"
+                    "\\end{center}\n\n"
+                )
+
+        if self._is_numbered_list_table(rows):
+            result = self._convert_numbered_list_table(rows)
+            if result:
+                return result
+
+        parent = element.find_parent("blockquote")
+        in_blockquote = parent is not None
+
+        return self._table_to_text(element, in_blockquote=in_blockquote)
+
+    def _clean_heading_content(self, raw: str) -> str:
+        cleaned = re.sub(r"\\endnote\{[^}]*\}", "", raw)
+        cleaned = re.sub(r"\s*>>\s*", "", cleaned)
+        cleaned = re.sub(r"\s*<<\s*", "", cleaned)
+        cleaned = re.sub(r"\\href\{[^}]+\}\{[^}]+\}", "", cleaned)
+        cleaned = re.sub(r"\s*\|\s*", " ", cleaned)
+        if re.match(r"^(MIA|Archive).*>(Archive|.*>.*)", cleaned, re.I):
+            return ""
+        if re.match(r"^Top\s+of\s+the\s+page\s*$", cleaned, re.I):
+            return ""
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    def _is_navigation_heading(self, elem: Tag) -> bool:
+        raw_text = elem.get_text(strip=True)
+        has_nav_arrows = ">>" in raw_text or "<<" in raw_text
+        has_nav_text = "top of the page" in raw_text.lower()
+        has_nav_links = len(elem.find_all("a", href=True)) > 0 and ("contents" in raw_text.lower() or "page" in raw_text.lower())
+        return has_nav_arrows or has_nav_text or has_nav_links
+
+    def _strip_trailing_breaks(self, text: str) -> str:
+        text = text.rstrip()
+        text = re.sub(r"(\\\\\s*)+$", "", text)
+        return text
+
+    def _strip_leading_breaks(self, text: str) -> str:
+        text = text.lstrip()
+        text = re.sub(r"^(\\\\\s*)+", "", text)
+        return text
+
+    def _normalize_block(self, text: str) -> str:
+        text = text or ""
+        text = self._strip_leading_breaks(self._strip_trailing_breaks(text))
+        lines = text.splitlines()
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        return "\n".join(lines)
+
+    def _is_poetry_cell(self, cell: Tag) -> bool:
+        """Check if a table cell contains poetry (multiple line breaks from br tags)."""
+        br_tags = cell.find_all("br")
+        if len(br_tags) >= 3:  # Poetry usually has multiple line breaks
+            return True
+        # Also check if content has multiple paragraphs or lines that look like poetry
+        text_content = cell.get_text("\n", strip=True)
+        lines = [line.strip() for line in text_content.split("\n") if line.strip()]
+        if len(lines) >= 3:
+            # Check if lines are short (typical of poetry)
+            short_lines = sum(1 for line in lines if len(line) < 80)
+            if short_lines >= len(lines) * 0.7:  # 70% are short lines
+                return True
+        return False
+
+    def _extract_and_format_poetry(self, cell: Tag) -> str:
+        """Extract poetry directly from HTML cell, preserving line breaks from br tags."""
+        from .utils import escape_latex
+        from .utils import clean_text_node
+        
+        lines = []
+        current_line_parts = []
+        
+        def extract_inline_content(elem):
+            """Extract and convert inline content (text, footnotes, emphasis, etc.) without wrapping."""
+            nonlocal current_line_parts
+            if isinstance(elem, NavigableString):
+                text = clean_text_node(str(elem))
+                if text:
+                    current_line_parts.append(escape_latex(text))
+            elif isinstance(elem, Tag):
+                if elem.name == "latexfootnote":
+                    # Handle footnote placeholder
+                    content = clean_text_fragments(elem.get("content", ""))
+                    if content:
+                        current_line_parts.append(f"\\endnote{{{escape_latex(content)}}}")
+                elif elem.name in ["em", "i", "cite"]:
+                    text = elem.get_text(" ", strip=True)
+                    if text:
+                        current_line_parts.append(f"\\textit{{{escape_latex(text)}}}")
+                elif elem.name in ["strong", "b"]:
+                    text = elem.get_text(" ", strip=True)
+                    if text:
+                        current_line_parts.append(f"\\textbf{{{escape_latex(text)}}}")
+                elif elem.name == "a":
+                    # Handle links - if it's a footnote, it should be converted already
+                    # Otherwise just get text
+                    text = elem.get_text(" ", strip=True)
+                    if text:
+                        current_line_parts.append(escape_latex(text))
+                else:
+                    # Recursively process other inline elements
+                    for child in elem.children:
+                        extract_inline_content(child)
+        
+        def process_poetry_element(elem):
+            """Process elements in poetry, handling br tags as line breaks."""
+            nonlocal current_line_parts
+            if isinstance(elem, NavigableString):
+                extract_inline_content(elem)
+            elif isinstance(elem, Tag):
+                if elem.name == "br":
+                    # br tag = end of line
+                    if current_line_parts:
+                        line_content = " ".join(current_line_parts).strip()
+                        if line_content:
+                            lines.append(line_content)
+                        current_line_parts = []
+                elif elem.name == "p":
+                    # Process paragraph contents directly (don't wrap)
+                    for child in elem.children:
+                        process_poetry_element(child)
+                else:
+                    extract_inline_content(elem)
+        
+        # Process all children of the cell
+        for child in cell.children:
+            process_poetry_element(child)
+        
+        # Add the last line if it has content
+        if current_line_parts:
+            line_content = " ".join(current_line_parts).strip()
+            if line_content:
+                lines.append(line_content)
+        
+        # Remove empty lines
+        lines = [line for line in lines if line.strip()]
+        
+        if not lines:
+            return ""
+        
+        # Format: each line ends with \\ except the last one
+        result_parts = []
+        for i, line in enumerate(lines):
+            if i > 0:
+                result_parts.append(" \\\\")
+            result_parts.append(f"\n{line}")
+        
+        return "".join(result_parts)
+    
+    def _format_poetry_content(self, content: str) -> str:
+        """Format poetry content preserving line breaks with proper LaTeX line breaks."""
+        # Remove any nested quoting environments that might have been added to paragraphs
+        content = re.sub(r"\\begin\{quoting\}\s*", "", content)
+        content = re.sub(r"\\end\{quoting\}\s*", "", content)
+        
+        # Split by line breaks and preserve them
+        lines = content.split("\n")
+        # Clean up lines but preserve structure
+        cleaned_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped:
+                cleaned_lines.append(stripped)
+        
+        if not cleaned_lines:
+            return content
+        
+        # Join lines with LaTeX line breaks (\\ for line break in quoting environment)
+        # Each line ends with \\ except the last one
+        result_parts = []
+        for i, line in enumerate(cleaned_lines):
+            if i > 0:
+                result_parts.append(" \\\\")
+            result_parts.append(f"\n{line}")
+        
+        return "".join(result_parts)
+
+    def _is_section_list_table(self, rows_list, convert_children) -> bool:
+        if len(rows_list) < 2:
+            return False
+        section_count = 0
+        list_count = 0
+        for row in rows_list:
+            cells = row.find_all(["td", "th"], recursive=False)
+            if len(cells) == 1 and cells[0].get("colspan") == "2":
+                continue
+            if row.find("hr"):
+                continue
+            if len(cells) == 2:
+                left_text = cells[0].get_text(strip=True)
+                right_elem = cells[1]
+                if re.match(r"^[IVX]+\.\s+[A-Z\s]+$", left_text.strip()):
+                    section_count += 1
+                if right_elem.find("ol"):
+                    list_count += 1
+        return section_count >= 1 and list_count >= 1
     def _table_to_text(self, table: Tag, in_blockquote: bool = False) -> str:
         rows = table.find_all("tr")
         if not rows:
             return ""
-        
+
+        # Flatten any nested lists to plain text for stable LaTeX.
+        for lst in table.find_all(["ol", "ul"]):
+            lst.replace_with(lst.get_text(" ", strip=True))
+
         lines = []
         for row in rows:
             cells = row.find_all(["td", "th"])
@@ -1367,3 +1664,99 @@ class MarxistsScraper:
             lines.append(" ".join(current_parts))
         
         return lines
+
+    def _convert_nested_value_form_table(self, element: Tag, convert_children) -> str:
+        """Render nested Marx value-form tables (vertical bar with a single equivalent column) as a tidy tabular layout."""
+        outer_rows = element.find_all("tr", recursive=False)
+        if len(outer_rows) != 1:
+            return ""
+
+        outer_cells = outer_rows[0].find_all("td", recursive=False)
+        if len(outer_cells) < 2:
+            return ""
+
+        inner_table = None
+        right_cell: Optional[Tag] = None
+        for cell in outer_cells:
+            nested = cell.find("table")
+            if nested and inner_table is None:
+                inner_table = nested
+            else:
+                text = clean_text_fragments(cell.get_text(" ", strip=True))
+                if text:
+                    right_cell = cell
+
+        if not inner_table or right_cell is None:
+            return ""
+
+        inner_rows = inner_table.find_all("tr", recursive=False)
+        if len(inner_rows) < 2:
+            return ""
+
+        left_items: List[str] = []
+        has_equals_column = False
+        for row in inner_rows:
+            cells = row.find_all(["td", "th"], recursive=False)
+            if not cells:
+                continue
+
+            raw_texts = [clean_text_fragments(c.get_text(" ", strip=True)) for c in cells]
+            if raw_texts and raw_texts[-1] == "=":
+                has_equals_column = True
+                cells = cells[:-1]
+
+            parts: List[str] = []
+            for cell in cells:
+                content = convert_children(cell)
+                content = self._normalize_block(content)
+                content = content.replace("\n", " ").strip()
+                content = re.sub(r"\s+", " ", content)
+                if content:
+                    parts.append(content)
+
+            combined = " ".join(parts).strip()
+            if combined:
+                left_items.append(combined)
+
+        if len(left_items) < 2:
+            return ""
+
+        right_content = convert_children(right_cell)
+        right_content = self._normalize_block(right_content)
+        right_content = right_content.replace("\n", " ").strip()
+        right_content = re.sub(r"\s+", " ", right_content)
+        if not right_content:
+            return ""
+
+        if not has_equals_column and not right_content.lstrip().startswith("="):
+            right_content = f"= {right_content}"
+
+        col_spec = (
+            r">{\raggedleft\arraybackslash}p{0.38\textwidth} c|p{0.5\textwidth}"
+            if has_equals_column
+            else r">{\raggedleft\arraybackslash}p{0.42\textwidth}|p{0.5\textwidth}"
+        )
+
+        total_rows = len(left_items)
+        table_rows: List[str] = []
+        for idx, item in enumerate(left_items):
+            if has_equals_column:
+                if idx == 0:
+                    table_rows.append(f"{item} & = & \\multirow{{{total_rows}}}{{*}}{{{right_content}}} \\\\")
+                else:
+                    table_rows.append(f"{item} & = & \\\\")
+            else:
+                if idx == 0:
+                    table_rows.append(f"{item} & \\multirow{{{total_rows}}}{{*}}{{{right_content}}} \\\\")
+                else:
+                    table_rows.append(f"{item} & \\\\")
+
+        return (
+            "\\begin{center}\n"
+            "\\setlength{\\tabcolsep}{1.1em}\n"
+            "\\renewcommand{\\arraystretch}{1.15}\n"
+            f"\\begin{{tabular}}{{{col_spec}}}\n"
+            + "\n".join(table_rows)
+            + "\n\\end{tabular}\n"
+            "\\end{center}\n\n"
+        )
