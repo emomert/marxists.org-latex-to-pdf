@@ -117,9 +117,19 @@ def install_latex_packages():
     print("Updating package database (this is critical)...")
     try:
         if use_miktex_cli:
+            # 1. Update package database
             subprocess.run([miktex_cmd, "packages", "update-package-database"], check=False)
+            
+            # 2. Check for updates (required by MiKTeX logic)
+            print("Checking for updates...")
+            subprocess.run([miktex_cmd, "packages", "check-update"], check=False)
+            
+            # 3. Apply updates (required to fix 'miktex-maketfm' error)
+            print("Applying critical updates...")
+            subprocess.run([miktex_cmd, "packages", "update"], check=False)
         else:
             subprocess.run([mpm_cmd, "--update-db"], check=False)
+            # Legacy mpm doesn't have easy 'update all' without admin, but update-db is usually enough
     except Exception as e:
         print(f"Warning: Could not update package database: {e}")
 
