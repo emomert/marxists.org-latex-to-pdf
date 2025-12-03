@@ -4,6 +4,13 @@ A simple tool to turn articles and books from [Marxists.org](https://www.marxist
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
+## Explanation Video
+
+https://github.com/user-attachments/assets/a3a942c7-5416-4dfc-83e2-4ca332fc2ad0
+
+Sorry for the quality of the video, the limit was 10 MB for the free plan 😥
+
+
 ## 🚀 How to Use (Easiest Way)
 
 1.  **Download** the latest release.
@@ -23,7 +30,7 @@ That's it! The PDF will appear in a new folder.
 *   **One-Click Conversion**: Just paste a link and go.
 *   **Smart Detection**: Works with single articles or entire books (automatically finds chapters).
 *   **Professional Quality**: Creates high-quality PDFs with proper fonts, table of contents, and formatting.
-*   **Endnotes**: Automatically handles footnotes and endnotes so links work perfectly.
+*   **Endnotes**: Automatically handles footnotes and endnotes so links work perfectly. (Sometimes it can't detect them if the article has both endnote and footnote)
 *   **Safe**: Polite crawling that respects the website's servers.
 
 ## 🛠️ Troubleshooting
