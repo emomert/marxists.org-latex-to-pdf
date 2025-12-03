@@ -17,3 +17,6 @@ output_*/
 # IDEs
 .vscode/
 .idea/
+
+# Binaries
+*.exe
