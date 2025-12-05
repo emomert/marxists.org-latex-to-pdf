@@ -17,9 +17,10 @@ Sorry for the quality of the video, the limit was 10 MB for the free plan 😥
 2.  **Run `InstallPrerequisites.exe`** first.
     *   This checks if you have LaTeX installed (needed to create PDFs).
     *   If not, it will help you install it automatically.
-3.  **Run `MarxistsConverter.exe`**.
-4.  **Paste a URL** from Marxists.org (e.g., an article or a book index).
-5.  Click **Convert**.
+3.  **Restart your computer** after the installation completes.
+4.  **Run `MarxistsConverter.exe`**.
+5.  **Paste a URL** from Marxists.org (e.g., an article or a book index).
+6.  Click **Convert**.
 
 That's it! The PDF will appear in a new folder.
 
@@ -37,6 +38,9 @@ That's it! The PDF will appear in a new folder.
 
 ### "It says I don't have LaTeX/XeLaTeX"
 Run the included `InstallPrerequisites.exe` file. It will try to install MiKTeX for you. If that fails, download and install [MiKTeX](https://miktex.org/download) manually.
+
+### "I installed MiKTeX but it still says LaTeX is not found"
+**Restart your computer.** After installing MiKTeX, your system needs to refresh its PATH environment variables. A restart ensures the converter can find the LaTeX tools.
 
 ### "The PDF isn't generating"
 *   Make sure you installed LaTeX (see above).
