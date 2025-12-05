@@ -5,8 +5,35 @@ import shutil
 import urllib.request
 import time
 
+
+def add_common_miktex_paths_to_env():
+    """
+    After installing MiKTeX, the PATH in the current process is often stale.
+    Add the typical install locations so we can immediately find the CLI tools.
+    """
+    candidates = []
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    program_files = os.environ.get("ProgramFiles", "")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
+
+    for base in (local_app_data, program_files, program_files_x86):
+        if not base:
+            continue
+        candidates.extend(
+            [
+                os.path.join(base, "Programs", "MiKTeX", "miktex", "bin", "x64"),
+                os.path.join(base, "MiKTeX", "miktex", "bin", "x64"),
+                os.path.join(base, "MiKTeX 2.9", "miktex", "bin", "x64"),
+            ]
+        )
+
+    for path in candidates:
+        if os.path.isdir(path) and path not in os.environ.get("PATH", ""):
+            os.environ["PATH"] += os.pathsep + path
+
 def check_latex():
     print("Checking for LaTeX (xelatex)...")
+    add_common_miktex_paths_to_env()
     if shutil.which("xelatex"):
         print("LaTeX is already installed!")
         return True
@@ -79,10 +106,27 @@ def install_latex_packages():
     
     # Packages used in latex.py
     packages = [
-        "gnu-free-fonts", # Fixes miktex-maketfm error
-        "titlesec", "fancyhdr", "geometry", "fontspec", "xcolor", "hyperref",
-        "enumitem", "multirow", "longtable", "float", "graphicx", "enotez",
-        "quoting", "parskip", "titletoc", "uucharclasses"
+        # Fonts and engine support
+        "fontspec",
+        "gnu-freefont",  # Provides FreeSerif used in the templates
+        # Formatting/layout
+        "titlesec",
+        "fancyhdr",
+        "geometry",
+        "parskip",
+        "titletoc",
+        # Tables, figures, lists
+        "array",
+        "float",
+        "longtable",
+        "multirow",
+        "enumitem",
+        "graphicx",
+        # Links/notes/quoting
+        "xcolor",
+        "hyperref",
+        "enotez",
+        "quoting",
     ]
     
     # Find mpm (MiKTeX Package Manager) or miktex CLI
@@ -90,26 +134,47 @@ def install_latex_packages():
     mpm_cmd = "mpm"
     use_miktex_cli = False
 
+    add_common_miktex_paths_to_env()
+    initexmf_cmd = shutil.which("initexmf")
+
     if shutil.which(miktex_cmd):
         use_miktex_cli = True
         print(f"Found MiKTeX CLI: {miktex_cmd}")
     elif shutil.which(mpm_cmd):
         print(f"Found Legacy MPM: {mpm_cmd}")
     else:
-        # Check default user install location if not in PATH
-        local_app_data = os.environ.get("LOCALAPPDATA", "")
-        # Try to find miktex.exe first (newer)
-        candidate_miktex = os.path.join(local_app_data, "Programs", "MiKTeX", "miktex", "bin", "x64", "miktex.exe")
-        candidate_mpm = os.path.join(local_app_data, "Programs", "MiKTeX", "miktex", "bin", "x64", "mpm.exe")
-        
-        if os.path.exists(candidate_miktex):
-            miktex_cmd = candidate_miktex
-            use_miktex_cli = True
-            os.environ["PATH"] += os.pathsep + os.path.dirname(candidate_miktex)
-        elif os.path.exists(candidate_mpm):
-            mpm_cmd = candidate_mpm
-            os.environ["PATH"] += os.pathsep + os.path.dirname(candidate_mpm)
-        else:
+        # Try to find miktex tools in common install locations (user or machine)
+        search_paths = []
+        for base in (
+            os.environ.get("LOCALAPPDATA", ""),
+            os.environ.get("ProgramFiles", ""),
+            os.environ.get("ProgramFiles(x86)", ""),
+        ):
+            if not base:
+                continue
+            search_paths.extend(
+                [
+                    os.path.join(base, "Programs", "MiKTeX", "miktex", "bin", "x64"),
+                    os.path.join(base, "MiKTeX", "miktex", "bin", "x64"),
+                    os.path.join(base, "MiKTeX 2.9", "miktex", "bin", "x64"),
+                ]
+            )
+
+        for path in search_paths:
+            candidate_miktex = os.path.join(path, "miktex.exe")
+            candidate_mpm = os.path.join(path, "mpm.exe")
+            if os.path.exists(candidate_miktex):
+                miktex_cmd = candidate_miktex
+                use_miktex_cli = True
+                os.environ["PATH"] += os.pathsep + path
+                break
+            if os.path.exists(candidate_mpm):
+                mpm_cmd = candidate_mpm
+                os.environ["PATH"] += os.pathsep + path
+                break
+
+        mpm_available = use_miktex_cli or shutil.which(mpm_cmd) or os.path.exists(mpm_cmd)
+        if not mpm_available:
             print("Could not find MiKTeX tools. Skipping package installation.")
             return
 
@@ -133,6 +198,13 @@ def install_latex_packages():
     except Exception as e:
         print(f"Warning: Could not update package database: {e}")
 
+    # Allow on-the-fly installs if anything is still missing later
+    if initexmf_cmd:
+        try:
+            subprocess.run([initexmf_cmd, "--set-config-value=[MPM]AutoInstall=1"], check=False)
+        except Exception as e:
+            print(f"Warning: Could not enable AutoInstall: {e}")
+
     for pkg in packages:
         print(f"Installing package: {pkg}...")
         try:
@@ -146,13 +218,13 @@ def install_latex_packages():
     print("Updating font maps...")
     try:
         if use_miktex_cli:
-             subprocess.run([miktex_cmd, "fndb", "refresh"], check=False)
-             subprocess.run([miktex_cmd, "fontmaps", "refresh"], check=False)
+            subprocess.run([miktex_cmd, "fndb", "refresh"], check=False)
+            subprocess.run([miktex_cmd, "fontmaps", "refresh"], check=False)
         else:
-            initexmf_cmd = "initexmf"
+            initexmf_cmd = initexmf_cmd or "initexmf"
             if not shutil.which(initexmf_cmd) and shutil.which(mpm_cmd):
-                 initexmf_cmd = os.path.join(os.path.dirname(mpm_cmd), "initexmf.exe")
-            
+                initexmf_cmd = os.path.join(os.path.dirname(mpm_cmd), "initexmf.exe")
+
             subprocess.run([initexmf_cmd, "--update-fndb"], check=False)
             subprocess.run([initexmf_cmd, "--mkmaps"], check=False)
         print("Packages and fonts updated successfully!")
