@@ -279,7 +279,7 @@ def build_latex_document(
                 latex_parts.append(r"\vspace{1.5em}")
                 part_title_escaped = escape_latex(chap.part_title)
                 part_label = f"part:{idx}"
-                latex_parts.append(rf"\phantomsection")
+                latex_parts.append(r"\phantomsection")
                 latex_parts.append(rf"\hypertarget{{{part_label}}}{{}}")
                 latex_parts.append(rf"\part*{{{part_title_escaped}}}")
                 latex_parts.append(rf"\addcontentsline{{toc}}{{part}}{{{part_title_escaped}}}")
@@ -310,7 +310,7 @@ def build_latex_document(
             section_title = strip_chapter_prefix(" ".join(chap.title.split()))
 
             label = f"chap:{idx}"
-            latex_parts.append(rf"\phantomsection")
+            latex_parts.append(r"\phantomsection")
             latex_parts.append(rf"\hypertarget{{{label}}}{{}}")
 
             section_title_escaped = escape_latex(section_title)
@@ -355,7 +355,6 @@ def compile_pdf(tex_path: str, workdir: str, log_fn=print) -> Tuple[bool, str]:
             log_fn(f"Running xelatex (pass {i+1}/3)...")
         try:
             # Suppress console window on Windows
-            startupinfo = None
             creationflags = 0
             if os.name == 'nt':
                 creationflags = subprocess.CREATE_NO_WINDOW

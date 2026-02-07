@@ -1,7 +1,6 @@
 import argparse
 import os
 import sys
-import shutil
 from datetime import datetime
 from typing import List, Optional
 

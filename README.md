@@ -1,6 +1,6 @@
-# Marxists.org to PDF Converter
+﻿# Marxists.org to PDF Converter
 
-A simple tool to turn articles and books from [Marxists.org](https://www.marxists.org/) into professional, readable PDF books.
+A tool to convert articles and books from [Marxists.org](https://www.marxists.org/) into clean PDF books.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
@@ -8,72 +8,57 @@ A simple tool to turn articles and books from [Marxists.org](https://www.marxist
 
 https://github.com/user-attachments/assets/a3a942c7-5416-4dfc-83e2-4ca332fc2ad0
 
-Sorry for the quality of the video, the limit was 10 MB for the free plan 😥
+## How to Use (Easiest Way)
 
+1. Open the `release` folder.
+2. Run `InstallPrerequisites.exe` first.
+   - This checks whether LaTeX is installed.
+   - If not, it helps install MiKTeX.
+3. Restart your computer after LaTeX installation.
+4. Run `MarxistsConverter.exe`.
+5. Paste a Marxists.org URL (article or book index).
+6. Click **Convert**.
 
-## 🚀 How to Use (Easiest Way)
+The PDF will be created in a new output folder.
 
-1.  **Download** the latest release.
-2.  **Run `InstallPrerequisites.exe`** first.
-    *   This checks if you have LaTeX installed (needed to create PDFs).
-    *   If not, it will help you install it automatically.
-3.  **Restart your computer** after the installation completes.
-4.  **Run `MarxistsConverter.exe`**.
-5.  **Paste a URL** from Marxists.org (e.g., an article or a book index).
-6.  Click **Convert**.
+## Features
 
-That's it! The PDF will appear in a new folder.
+- One-click conversion from URL to PDF.
+- Smart detection for article vs. multi-chapter book pages.
+- Professional PDF formatting (TOC, fonts, spacing, endnotes).
+- Footnote/endnote handling for most Marxists.org formats.
+- Polite crawling with request delays.
 
----
-
-## ✨ Features
-
-*   **One-Click Conversion**: Just paste a link and go.
-*   **Smart Detection**: Works with single articles or entire books (automatically finds chapters).
-*   **Professional Quality**: Creates high-quality PDFs with proper fonts, table of contents, and formatting.
-*   **Endnotes**: Automatically handles footnotes and endnotes so links work perfectly. (Sometimes it can't detect them if the article has both endnote and footnote)
-*   **Safe**: Polite crawling that respects the website's servers.
-
-## 🛠️ Troubleshooting
+## Troubleshooting
 
 ### "It says I don't have LaTeX/XeLaTeX"
-Run the included `InstallPrerequisites.exe` file. It will try to install MiKTeX for you. If that fails, download and install [MiKTeX](https://miktex.org/download) manually.
+Run `InstallPrerequisites.exe`. If that fails, install [MiKTeX](https://miktex.org/download) manually.
 
-### "I installed MiKTeX but it still says LaTeX is not found"
-**Restart your computer.** After installing MiKTeX, your system needs to refresh its PATH environment variables. A restart ensures the converter can find the LaTeX tools.
+### "I installed MiKTeX but LaTeX is still not found"
+Restart your computer so PATH changes are applied.
 
 ### "The PDF isn't generating"
-*   Make sure you installed LaTeX (see above).
-*   Check your internet connection.
-*   If a book is very large, it might take a while.
+- Confirm LaTeX is installed.
+- Check internet connection.
+- Large books can take longer.
 
-### "It keeps asking to install packages (e.g., levy-font, B.mf)"
-**This is normal!**
-*   To keep the download small, we installed the "Basic" version of MiKTeX.
-*   When you create a PDF for the first time, it needs to download some fonts and packages.
-*   **Solution**: Just click **Install**.
-*   **Tip**: You can uncheck "Always show this dialog" so it installs them automatically in the future without asking.
+### "It keeps asking to install packages (fonts/packages)"
+This is normal with basic MiKTeX installs. Allow the package install prompts (or enable automatic installs in MiKTeX).
 
-### "My antivirus says the file is a virus!"
-**Don't worry, this is a False Positive.**
-*   The `InstallPrerequisites.exe` file is a simple script that downloads MiKTeX (the PDF tool) from the internet.
-*   Because it downloads and installs software, and because it is not "digitally signed" (which costs hundreds of dollars), some antiviruses flag it as suspicious.
-*   **The code is open source.** You can check `install_prerequisites.py` to see exactly what it does.
-*   **Alternative**: If you prefer, you can install [MiKTeX](https://miktex.org/download) manually and then run the converter.
+### "My antivirus flags the installer"
+`InstallPrerequisites.exe` may trigger false positives because it downloads/install tools and is not code-signed.
 
 ### "I want to run from source code"
-If you don't trust the `.exe` files or are a developer, you can run the Python code directly:
-1.  Install [Python 3.8+](https://www.python.org/downloads/).
-2.  Open a terminal in the project folder.
-3.  Install dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
-4.  Run the app:
-    ```bash
-    python run.py
-    ```
+1. Install [Python 3.8+](https://www.python.org/downloads/).
+2. In the project folder:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Run:
+   ```bash
+   python run.py
+   ```
 
-## 📄 License
+## License
+
 This project is licensed under the MIT License.
-
